@@ -204,8 +204,12 @@ def main():
                             ensure_header(writer, f, wrote_header)
                             writer.writerow(row)
                             if not args.quiet:
-                                print(f"{row['ts_iso']} {row['symbol']} {row['liq_side']} "
-                                      f"{row['qty']} @ {row['price']} → {row['notional']:.2f}")
+                                ts = datetime.fromisoformat(row['ts_iso']).strftime("%H:%M:%S")
+                                print(
+                                    f"[LIQUIDATION] {ts} | {row['symbol']} | {row['liq_side'].upper()} | "
+                                    f"Qty: {row['qty']} | Price: {row['price']:.4f} | Notional: ${row['notional']:.2f}"
+                                )
+
                 except KeyboardInterrupt:
                     print("\n[✓] Stopped by user.")
                     return
