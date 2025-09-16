@@ -1,0 +1,25 @@
+
+---
+
+### **.gitignore**
+```txt
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs & temp
+*.log
+*.tmp
+
+# Data outputs
+*.csv
+
+# OS / editor files
+.DS_Store
+Thumbs.db
