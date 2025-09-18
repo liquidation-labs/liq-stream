@@ -1,24 +1,25 @@
-# Liquidation Labs — Binance Liquidations → CSV
+# Liquidation Labs – liq-stream
 
-Stream Binance Futures liquidation events into a CSV.  
-Supports USDT-M (`fstream`) and COIN-M (`dstream`), optional symbol filter, auto-reconnect, and graceful shutdown.
+Stream crypto liquidation events into CSV files.  
+Currently supports **Binance (USDT-M & COIN-M)** with daily CSV rotation.  
+Adapters for Bybit/OKX coming soon.
 
 ---
 
-## 🚀 Quickstart
+## Features
+- Streams **all pairs** (USDT-M or COIN-M).
+- Writes **daily CSVs** (e.g. `data/liquidations_2025-09-17.csv`).
+- Unified schema across exchanges.
+- Clear console output for easy monitoring.
+- Refactored adapter pattern → new exchanges easy to plug in.
 
+---
+
+## Quickstart
 ```bash
-# 1. Create and activate a virtual environment
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-
-# 2. Install dependencies
+git clone https://github.com/liquidation-labs/liq-stream.git
+cd liq-stream
 pip install -r requirements.txt
 
-# 3. Run (USDT-M all pairs → liquidations.csv)
-python liq_stream.py --market usdt
-
-# Example: COIN-M only
-python liq_stream.py --market coin --outfile coinm_liqs.csv
-
-# Example: Single symbol only
-python liq_stream.py --symbol BTCUSDT
+# Run Binance USDT-M
+python stream.py --exchange binance --market usdt --outdir data
