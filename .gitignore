@@ -1,25 +1,16 @@
-
----
-
-### **.gitignore**
-```txt
-# Virtual environment
-.venv/
-venv/
-
-# Python cache
+# Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
+.venv/
+.env
 
-# Logs & temp
-*.log
-*.tmp
-
-# Data outputs
+# Data
+data/
 *.csv
 
-# OS / editor files
+# OS/editor
 .DS_Store
 Thumbs.db
+
+# Logs
+logs/
