@@ -98,6 +98,7 @@ Files rotate daily (UTC).
 
 ## 📷 Visual
 
+```mermaid
 flowchart LR
   A[Binance forceOrder arr] --> N[Normalizer]
   B[Bybit v5 liquidation SYMBOL] --> N
