@@ -98,15 +98,14 @@ Files rotate daily (UTC).
 
 ## 📷 Visual
 
-```mermaid
 flowchart LR
-  A[Binance !forceOrder@arr] --> N[Normalizer]
-  B[Bybit v5 liquidation.SYMBOL] --> N
-  C[OKX v5 liquidation-orders] --> N
+  A[Binance forceOrder arr] --> N[Normalizer]
+  B[Bybit v5 liquidation SYMBOL] --> N
+  C[OKX v5 liquidation orders] --> N
   N --> W[WriterShim]
-  W --> F[CSV (daily rotate)]
-  W --> T[Terminal Prints (color-coded)]
-```
+  W --> F[CSV daily rotate]
+  W --> T[Terminal prints color-coded]
+
 
 ## 📌 Notes
 
