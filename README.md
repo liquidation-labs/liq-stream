@@ -106,7 +106,7 @@ flowchart LR
   N --> W[WriterShim]
   W --> F[CSV daily rotate]
   W --> T[Terminal prints color-coded]
-
+```
 
 ## 📌 Notes
 
