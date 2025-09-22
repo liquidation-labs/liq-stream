@@ -91,7 +91,7 @@ flowchart LR
   B[Bybit allLiquidation.<SYMBOL>] --> N
   C[OKX liquidation-orders] --> N
   N --> W[WriterShim]
-  W --> F[CSV (daily rotate)]
+  W --> F[CSV daily rotate]
   W --> P[Postgres (batch inserts)]
   W --> T[Terminal Prints (color-coded)]
 ```
