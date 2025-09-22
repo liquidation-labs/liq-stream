@@ -1,74 +1,85 @@
-# stream.py
+# stream.py (only the changed/new parts)
+
 import argparse
 import asyncio
 import os
-import sys
 from datetime import datetime, timezone
-from typing import List, Tuple
 
 from adapters import get_adapter
 from writer_csv import CSVWriter
+from writer_pg import PostgresWriter  # NEW
 
-# ---------- Pretty terminal output (optional colors) ----------
-CLR_RED   = "\x1b[31m"
-CLR_GREEN = "\x1b[32m"
-CLR_DIM   = "\x1b[2m"
-CLR_RST   = "\x1b[0m"
 
-# ---------- Writer shim prints + writes ----------
-class WriterShim:
-    def __init__(self, outdir: str, print_colors: bool = True, no_write: bool = False):
-        self.no_write = no_write
-        self.print_colors = print_colors
-        if not no_write:
-            os.makedirs(outdir, exist_ok=True)
-            self.csv = CSVWriter(outdir)
-
-    def write_row(self, row: dict):
-        # terminal line
-        side = (row.get("side") or "").lower()
-        color = ""
-        if self.print_colors:
-            color = CLR_RED if side == "long" else CLR_GREEN if side == "short" else ""
-        line = (
-            f"[{row['exchange']}/{row['market']}] {row['symbol']} | "
-            f"{color}{row['side']}{CLR_RST if color else ''} | "
-            f"qty={row['qty']} @ {row['price']} "
-            f"({CLR_DIM}notional={row['notional']}{CLR_RST})"
-        )
-        print(line)
-        # csv
-        if not self.no_write:
-            self.csv.write_row(row)
-
-# ---------- CLI ----------
 def parse_args():
-    p = argparse.ArgumentParser(description="Stream crypto liquidations to CSV (+ log to terminal)")
-    # single-stream mode (backwards compatible)
-    p.add_argument("--exchange", choices=["binance", "bybit", "okx"], help="Exchange to stream")
-    p.add_argument("--market", choices=["usdt", "coin"], help="Market type (USDT-margined or COIN-margined)")
+    p = argparse.ArgumentParser(description="Stream crypto liquidations → CSV and/or Postgres")
+    # existing…
+    p.add_argument("--exchange", choices=["binance", "bybit", "okx"])
+    p.add_argument("--market", choices=["usdt", "coin"])
     p.add_argument("--outdir", help="Output directory (single-stream mode)")
-    # multi-stream mode
-    p.add_argument("--all", action="store_true", help="Run ALL exchanges/markets at once (6 streams)")
-    p.add_argument("--streams", default="", help="Comma list: e.g. binance:usdt,bybit:coin,okx:usdt")
-    p.add_argument("--outdir-root", default="data", help="Root output dir when running multiple streams")
-    # behavior
-    p.add_argument("--no-write", action="store_true", help="Print only; do not write CSV files")
-    p.add_argument("--no-color", action="store_true", help="Disable ANSI colors in terminal prints")
-    # Bybit tuning
-    p.add_argument("--subscribe-chunk", type=int, default=100, help="Bybit: symbols per subscribe request")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--streams", default="")
+    p.add_argument("--outdir-root", default="data")
+    p.add_argument("--no-write", action="store_true")
+    p.add_argument("--no-color", action="store_true")
+    p.add_argument("--subscribe-chunk", type=int, default=100)
+    # NEW: sinks & Postgres config
+    p.add_argument("--sink", choices=["csv", "pg", "both"], default="both",
+                   help="Where to write: csv, pg, or both")
+    p.add_argument("--pg-dsn", default=os.environ.get("PG_DSN", ""),
+                   help="Postgres DSN (e.g., postgres://user:pass@host:5432/db)")
+    p.add_argument("--pg-table", default=os.environ.get("PG_TABLE", "public.liquidations"),
+                   help="Postgres table name (schema.table)")
+    p.add_argument("--pg-batch", type=int, default=int(os.environ.get("PG_BATCH", "500")),
+                   help="Batch size for inserts")
+    p.add_argument("--pg-interval", type=float, default=float(os.environ.get("PG_INTERVAL", "1.0")),
+                   help="Flush interval seconds")
     return p.parse_args()
 
-# ---------- Helpers ----------
-def _resolve_streams(args) -> List[Tuple[str, str]]:
+
+class WriterShim:
     """
-    Returns a list of (exchange, market) pairs.
-    Priority:
-      1) --all
-      2) --streams
-      3) legacy single: --exchange + --market
+    Fan-out writer: prints, then forwards to CSV and/or Postgres.
     """
-    pairs: List[Tuple[str, str]] = []
+    def __init__(self, outdir: str, print_colors: bool, no_write: bool, csv_writer: CSVWriter | None, pg_writer: PostgresWriter | None):
+        self.no_write = no_write
+        self.csv_writer = csv_writer
+        self.pg_writer = pg_writer
+        self.print_colors = print_colors
+
+        # colors
+        self.CLR_RED   = "\x1b[31m"
+        self.CLR_GREEN = "\x1b[32m"
+        self.CLR_DIM   = "\x1b[2m"
+        self.CLR_RST   = "\x1b[0m"
+
+    def write_row(self, row: dict):
+        # terminal print
+        side = (row.get("side") or "").lower()
+        color = self.CLR_RED if side == "long" else self.CLR_GREEN if side == "short" else ""
+        line = (
+            f"[{row['exchange']}/{row['market']}] {row['symbol']} | "
+            f"{(color + row['side'] + self.CLR_RST) if color and row.get('side') else (row.get('side') or '')} | "
+            f"qty={row.get('qty')} @ {row.get('price')} "
+            f"({self.CLR_DIM}notional={row.get('notional')}{self.CLR_RST})"
+        )
+        if not self.print_colors:
+            # strip ANSI
+            import re
+            line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        print(line)
+
+        if self.no_write:
+            return
+
+        if self.csv_writer:
+            self.csv_writer.write_row(row)
+
+        if self.pg_writer:
+            self.pg_writer.write_row(row)
+
+
+def _resolve_streams(args):
+    pairs = []
     if args.all:
         pairs = [
             ("binance", "usdt"), ("binance", "coin"),
@@ -77,70 +88,71 @@ def _resolve_streams(args) -> List[Tuple[str, str]]:
         ]
     elif args.streams:
         for item in args.streams.split(","):
-            item = item.strip()
-            if not item:
-                continue
-            try:
-                ex, mk = item.split(":")
-                ex, mk = ex.strip().lower(), mk.strip().lower()
-                if ex not in {"binance", "bybit", "okx"} or mk not in {"usdt", "coin"}:
-                    raise ValueError
-                pairs.append((ex, mk))
-            except ValueError:
-                print(f"Invalid --streams entry: '{item}'. Use exchange:market (e.g., bybit:usdt).", file=sys.stderr)
-                sys.exit(2)
+            ex, mk = item.strip().split(":")
+            pairs.append((ex.lower(), mk.lower()))
     else:
-        # single mode
-        if not (args.exchange and args.market):
-            print("Either use --all, or --streams, or provide --exchange and --market.", file=sys.stderr)
-            sys.exit(2)
         pairs = [(args.exchange, args.market)]
     return pairs
 
+
 def _outdir_for(ex: str, mk: str, args) -> str:
-    if args.outdir:
-        # single-stream mode honors --outdir if provided
-        return args.outdir
-    # multi: partition under root
-    return os.path.join(args.outdir_root, f"{ex}_{mk}")
+    return args.outdir or os.path.join(args.outdir_root, f"{ex}_{mk}")
 
-async def _run_one(ex: str, mk: str, args):
+
+async def _run_one(ex: str, mk: str, args, pg_writer: PostgresWriter | None):
     outdir = _outdir_for(ex, mk, args)
-    writer = WriterShim(outdir, print_colors=not args.no_color, no_write=args.no_write)
+    csv_writer = None
+    if args.sink in ("csv", "both") and not args.no_write:
+        os.makedirs(outdir, exist_ok=True)
+        csv_writer = CSVWriter(outdir)
 
-    AdapterCls = get_adapter(ex)
-    # pass Bybit subscribe_chunk only where relevant
+    writer = WriterShim(
+        outdir=outdir,
+        print_colors=not args.no_color,
+        no_write=args.no_write,
+        csv_writer=csv_writer,
+        pg_writer=pg_writer if (args.sink in ("pg", "both") and not args.no_write) else None
+    )
+
+    Adapter = get_adapter(ex)
     if ex == "bybit":
-        adapter = AdapterCls(writer=writer, market=mk, symbols=None, subscribe_chunk=max(1, args.subscribe_chunk))
+        adapter = Adapter(writer=writer, market=mk, symbols=None, subscribe_chunk=max(1, args.subscribe_chunk))
     else:
-        adapter = AdapterCls(writer=writer, market=mk)
+        adapter = Adapter(writer=writer, market=mk)
 
-    header = f"[{ex}/{mk}]"
-    print(f"{header} starting → writing to {outdir}  ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')})")
+    print(f"[{ex}/{mk}] starting → {outdir} @ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     await adapter.run()
 
+
 async def run_all(args):
-    pairs = _resolve_streams(args)
-    print("Launching streams:", ", ".join([f"{ex}:{mk}" for ex, mk in pairs]))
-    tasks = [asyncio.create_task(_run_one(ex, mk, args)) for ex, mk in pairs]
-    # if any task crashes, we keep others running; gather with return_exceptions
-    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-    # surface the first exception (if any)
-    for d in done:
-        exc = d.exception()
-        if exc:
-            print(f"Task crashed: {exc}", file=sys.stderr)
-    # keep process alive while others run
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # Init a shared PG writer if needed
+    pg_writer = None
+    if args.sink in ("pg", "both") and not args.no_write:
+        if not args.pg_dsn:
+            raise SystemExit("Postgres sink requested but --pg-dsn not provided (or PG_DSN env).")
+        pg_writer = await PostgresWriter.create(
+            dsn=args.pg_dsn,
+            table_name=args.pg_table,
+            batch_size=args.pg_batch,
+            flush_interval=args.pg_interval,
+        )
+
+    try:
+        pairs = _resolve_streams(args)
+        tasks = [asyncio.create_task(_run_one(ex, mk, args, pg_writer)) for ex, mk in pairs]
+        await asyncio.gather(*tasks)
+    finally:
+        if pg_writer:
+            await pg_writer.aclose()
+
 
 def main():
     args = parse_args()
-    mode = "ALL" if args.all else ("MULTI" if args.streams else "SINGLE")
-    print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}] Mode: {mode}")
     try:
         asyncio.run(run_all(args))
     except KeyboardInterrupt:
         print("\nShutting down…")
+
 
 if __name__ == "__main__":
     main()

@@ -1,176 +1,227 @@
 # adapters/bybit_adapter.py
-
 import asyncio
 import json
-import math
+import logging
 import time
-from typing import Iterable, List, Dict, Any, Optional
+from datetime import datetime, timezone
+from typing import List, Optional
 
 import websockets
 import requests
 
-BYBIT_REST = "https://api.bybit.com/v5/market/instruments-info"
-BYBIT_WS_LINEAR  = "wss://stream.bybit.com/v5/public/linear"
-BYBIT_WS_INVERSE = "wss://stream.bybit.com/v5/public/inverse"
-
-# ---- Small helpers ----
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
-def _chunked(it: Iterable[Any], n: int) -> Iterable[List[Any]]:
-    buf = []
-    for x in it:
-        buf.append(x)
-        if len(buf) >= n:
-            yield buf
-            buf = []
-    if buf:
-        yield buf
 
-def _category_for_market(market: str) -> str:
-    # USDT-M = "linear", COIN-M = "inverse"
-    m = (market or "").lower()
-    if m == "usdt":
-        return "linear"
-    if m in ("coin", "coinm", "inverse"):
-        return "inverse"
-    raise ValueError(f"Unknown Bybit market: {market}")
+def _to_float(x) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
 
-def _ws_url_for_category(category: str) -> str:
-    return BYBIT_WS_LINEAR if category == "linear" else BYBIT_WS_INVERSE
-
-# ---- Adapter ----
 
 class BybitAdapter:
+    """
+    Streams Bybit liquidations via v5 public WS.
+
+    Defaults to the newer per-symbol channel:
+      - allLiquidation.<SYMBOL>
+
+    You can opt into the legacy channel by passing use_all=False:
+      - liquidation.<SYMBOL>
+
+    Market mapping:
+      - market == "usdt"   -> linear  (wss://stream.bybit.com/v5/public/linear)
+      - market in {"coin","coinm","inverse"} -> inverse (wss://stream.bybit.com/v5/public/inverse)
+    """
+
     EXCHANGE = "bybit"
 
-    def __init__(self, writer, market: str, symbols: Optional[List[str]] = None, subscribe_chunk: int = 100):
+    def __init__(
+        self,
+        writer,
+        market: str = "usdt",
+        symbols: Optional[List[str]] = None,
+        subscribe_chunk: int = 100,
+        use_all: bool = True,
+    ):
         self.writer = writer
-        self.market = market.lower()
-        self.category = _category_for_market(self.market)
-        self.ws_url = _ws_url_for_category(self.category)
-        self.subscribe_chunk = max(1, subscribe_chunk)
+        self.market = (market or "").lower()  # "usdt" or "coin"
         self.symbols = symbols or []
+        self.subscribe_chunk = max(1, int(subscribe_chunk))
+        self.use_all = bool(use_all)
 
-    def _fetch_symbols(self) -> List[str]:
-        if self.symbols:
-            return self.symbols
+        if self.market == "usdt":
+            self.ws_url = "wss://stream.bybit.com/v5/public/linear"
+            self.category = "linear"
+        elif self.market in {"coin", "coinm", "inverse"}:
+            self.ws_url = "wss://stream.bybit.com/v5/public/inverse"
+            self.category = "inverse"
+        else:
+            raise ValueError(f"Unknown Bybit market: {market}")
+
+    # -------------------- Public entrypoint --------------------
+
+    async def run(self):
+        if not self.symbols:
+            self.symbols = await self._fetch_symbols()
+        if not self.symbols:
+            logging.error(f"[bybit/{self.market}] No symbols discovered; exiting.")
+            return
+
+        backoff = 1.0
+        while True:
+            try:
+                logging.info(f"[bybit/{self.market}] Connecting: {self.ws_url}")
+                async with websockets.connect(
+                    self.ws_url, ping_interval=20, ping_timeout=10, max_size=10_000_000
+                ) as ws:
+                    logging.info(
+                        f"[bybit/{self.market}] Connected. Subscribing to {len(self.symbols)} symbols "
+                        f"via {'allLiquidation' if self.use_all else 'liquidation'} (chunk={self.subscribe_chunk})."
+                    )
+                    await self._subscribe(ws, self.symbols)
+
+                    # Reset backoff after a successful connect
+                    backoff = 1.0
+
+                    async for msg in ws:
+                        if isinstance(msg, bytes):
+                            msg = msg.decode("utf-8", "ignore")
+
+                        # Bybit sends JSON frames
+                        try:
+                            data = json.loads(msg)
+                        except json.JSONDecodeError:
+                            continue
+
+                        await self._handle_message(data)
+
+            except Exception as e:
+                logging.error(f"[bybit/{self.market}] WS error: {e}. Reconnecting in {backoff:.1f}s...")
+                await asyncio.sleep(backoff)
+                backoff = min(30.0, backoff * 1.8)
+
+    # -------------------- Internals --------------------
+
+    async def _fetch_symbols(self) -> List[str]:
+        """Fetch all symbols for the selected category (linear/inverse)."""
+        url = "https://api.bybit.com/v5/market/instruments-info"
         params = {"category": self.category}
         try:
-            r = requests.get(BYBIT_REST, params=params, timeout=20)
+            r = requests.get(url, params=params, timeout=20)
             r.raise_for_status()
             data = r.json()
             items = (data or {}).get("result", {}).get("list", []) or []
-            # Symbols look like "BTCUSDT", "ETHUSD", etc.
-            return [it["symbol"] for it in items if it.get("symbol")]
+            symbols = [it["symbol"] for it in items if it.get("symbol")]
+            logging.info(f"[bybit/{self.market}] Discovered {len(symbols)} symbols for {self.category}.")
+            return symbols
         except Exception as e:
-            print(f"[bybit] Error fetching symbols: {e}")
+            logging.error(f"[bybit/{self.market}] Error fetching symbols: {e}")
             return []
 
     async def _subscribe(self, ws, symbols: List[str]):
-        # Topic name: liquidation.{symbol}
-        for batch in _chunked(symbols, self.subscribe_chunk):
-            args = [f"liquidation.{sym}" for sym in batch]
+        """Subscribe in chunks to avoid payload/limit issues."""
+        prefix = "allLiquidation" if self.use_all else "liquidation"
+        total = len(symbols)
+        sent = 0
+
+        for i in range(0, total, self.subscribe_chunk):
+            chunk = symbols[i : i + self.subscribe_chunk]
+            args = [f"{prefix}.{s}" for s in chunk]
             sub = {"op": "subscribe", "args": args}
             await ws.send(json.dumps(sub))
-            # read ack(s) – Bybit sends a single ack; we won’t block forever
+            sent += len(chunk)
+            logging.info(f"[bybit/{self.market}] Subscribed {sent}/{total}")
+            # Try to read an ack to keep the buffer clean (don't block forever)
             try:
-                ack = await asyncio.wait_for(ws.recv(), timeout=5)
-                # optional: print(f"[bybit] Sub ack: {ack}")
+                ack = await asyncio.wait_for(ws.recv(), timeout=3)
+                # Optional: logging.debug(f"[bybit/{self.market}] Sub ack: {ack}")
             except asyncio.TimeoutError:
                 pass
             await asyncio.sleep(0.1)  # gentle pacing
 
-    def _normalize_and_write(self, msg: Dict[str, Any]):
-        """
-        Bybit v5 liquidation payload example (public):
-        {
-          "topic":"liquidation.BTCUSDT",
-          "type":"snapshot",
-          "ts": 1700000000000,
-          "data":[
-             {"updatedTimeE6":..., "price":"...", "size":"...", "side":"Buy"/"Sell", "symbol":"BTCUSDT"}
-          ]
-        }
-        Some gateways deliver single dict under "data". Handle both.
-        """
-        try:
-            topic = msg.get("topic", "")
-            if not topic.startswith("liquidation."):
-                return
-
-            d = msg.get("data")
-            if not d:
-                return
-
-            rows = d if isinstance(d, list) else [d]
-            ts_msg = msg.get("ts")  # message server timestamp (ms)
-            ts_ingest = _now_ms()
-
-            for row in rows:
-                symbol = row.get("symbol")
-                # Bybit "side" is the aggressor direction of the liquidation (taker?). We map to pos side:
-                # Convention (common in feeds):
-                # - If side == "Buy" => SHORTs liquidated (buy to cover)
-                # - If side == "Sell" => LONGs liquidated (sell to close)
-                side_raw = (row.get("side") or "").lower()
-                liq_side = "short" if side_raw == "buy" else "long" if side_raw == "sell" else side_raw
-
-                # sizes come as strings; cast as float
-                price = float(row.get("price") or 0.0)
-                qty   = float(row.get("size") or 0.0)
-                notional = price * qty if price and qty else None
-
-                ts_exch = None
-                for key in ("updatedTimeE6", "updatedTime", "ts", "time"):
-                    v = row.get(key)
-                    if v is not None:
-                        # updatedTimeE6 is µs
-                        if key == "updatedTimeE6":
-                            ts_exch = int(int(v) / 1000)
-                        else:
-                            ts_exch = int(v)
-                        break
-                if ts_exch is None and ts_msg:
-                    ts_exch = int(ts_msg)
-
-                out = {
-                    "exchange": self.EXCHANGE,
-                    "market": self.market,          # "usdt" or "coin"
-                    "symbol": symbol,
-                    "side": liq_side,               # "long" or "short"
-                    "qty": qty,
-                    "price": price,
-                    "notional": notional,
-                    "ts_exch_ms": ts_exch,
-                    "ts_ingest_ms": ts_ingest,
-                    "raw": json.dumps(row, separators=(",", ":"))
-                }
-                self.writer.write_row(out)
-        except Exception as e:
-            print(f"[bybit] Error normalizing message: {e}")
-
-    async def run(self):
-        symbols = self._fetch_symbols()
-        if not symbols:
-            print("[bybit] No symbols found; exiting.")
+    async def _handle_message(self, data: dict):
+        """Dispatch per topic and normalize."""
+        topic = data.get("topic", "")
+        if not topic:
             return
 
-        print(f"[bybit] Connecting {self.ws_url} for {len(symbols)} symbols ({self.category}).")
-        async for ws in websockets.connect(self.ws_url, ping_interval=20, ping_timeout=10, max_size=10_000_000):
-            try:
-                await self._subscribe(ws, symbols)
-                while True:
-                    msg = await ws.recv()
-                    if isinstance(msg, bytes):
-                        msg = msg.decode("utf-8", "ignore")
-                    if msg == "ping":
-                        await ws.send("pong")
-                        continue
-                    data = json.loads(msg)
-                    self._normalize_and_write(data)
-            except Exception as e:
-                print(f"[bybit] WS error: {e}; reconnecting in 3s...")
-                await asyncio.sleep(3)
-                continue
+        # New channel: allLiquidation.<SYMBOL>  (data: list of compact rows)
+        if topic.startswith("allLiquidation."):
+            rows = data.get("data") or []
+            msg_ts = data.get("ts")
+            for liq in rows:
+                self._process_liquidation_any(liq, msg_ts)
+            return
+
+        # Legacy channel: liquidation.<SYMBOL>  (data: dict or list)
+        if topic.startswith("liquidation."):
+            rows = data.get("data")
+            if rows is None:
+                return
+            msg_ts = data.get("ts")
+            if isinstance(rows, dict):
+                self._process_liquidation_any(rows, msg_ts)
+            else:
+                for liq in rows:
+                    self._process_liquidation_any(liq, msg_ts)
+            return
+
+    def _process_liquidation_any(self, liq: dict, msg_ts: Optional[int]):
+        """
+        Normalize both Bybit schemas:
+
+        New allLiquidation rows (compact keys):
+          { "T": 1739502302929, "s": "ROSEUSDT", "S": "Sell", "v": "20000", "p": "0.04499" }
+
+        Legacy liquidation rows:
+          { "updatedTimeE6": "...", "symbol": "BTCUSDT", "side": "Buy"/"Sell", "size": "0.01", "price": "30000" }
+
+        Emits unified schema required by WriterShim/CSVWriter.
+        """
+        try:
+            # Symbol
+            symbol = liq.get("s") or liq.get("symbol") or ""
+
+            # Side mapping -> which positions were liquidated:
+            #   "Buy"  => shorts liquidated (forced buy to cover)
+            #   "Sell" => longs  liquidated (forced sell to close)
+            side_raw = (liq.get("S") or liq.get("side") or "").lower()
+            liq_side = "short" if side_raw == "buy" else "long" if side_raw == "sell" else ""
+
+            # Qty / Price
+            qty = _to_float(liq.get("v") or liq.get("size") or 0)
+            price = _to_float(liq.get("p") or liq.get("price") or 0)
+            notional = price * qty if price and qty else 0.0
+
+            # Timestamps (ms)
+            ts_exch_ms = None
+            if liq.get("T") is not None:  # new schema ms
+                ts_exch_ms = int(liq["T"])
+            elif liq.get("updatedTimeE6") is not None:  # legacy µs
+                ts_exch_ms = int(int(liq["updatedTimeE6"]) / 1000)
+            elif msg_ts is not None:
+                ts_exch_ms = int(msg_ts)
+
+            out = {
+                "exchange": self.EXCHANGE,
+                "market": self.market,         # "usdt" or "coin"
+                "symbol": symbol,
+                "side": liq_side,              # "long" | "short"
+                "qty": qty,
+                "price": price,
+                "notional": notional,
+                "ts_exch_ms": ts_exch_ms,
+                "ts_ingest_ms": _now_ms(),
+                "raw": json.dumps(liq, separators=(",", ":")),
+            }
+
+            # Terminal print (coloring handled by WriterShim if you added it)
+            # print(f"[bybit/{self.market}] {symbol} | {liq_side} | qty={qty} @ {price} (notional={notional})")
+
+            self.writer.write_row(out)
+
+        except Exception as e:
+            logging.error(f"[bybit/{self.market}] normalize error: {e} :: {liq}")
