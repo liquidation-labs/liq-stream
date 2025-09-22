@@ -88,13 +88,13 @@ erDiagram
 
 ```mermaid
 flowchart LR
-  A[Binance forceOrder arr] --> N[Normalizer]
-  B[Bybit v5 liquidation SYMBOL] --> N
-  C[OKX v5 liquidation orders] --> N
-  N --> W[WriterShim]
-  W --> F[CSV daily rotate]
-  W --> T[Terminal prints color-coded]
-  W --> P[Postgres (batch inserts)]
+  A["Binance !forceOrder@arr"] --> N["Normalizer"]
+  B["Bybit allLiquidation.&lt;SYMBOL&gt;"] --> N
+  C["OKX liquidation-orders"] --> N
+  N --> W["WriterShim"]
+  W --> F["CSV (daily rotate)"]
+  W --> P["Postgres (batch inserts)"]
+  W --> T["Terminal prints (color-coded)"]
 ```
 
 ## 📌 Notes
