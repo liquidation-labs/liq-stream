@@ -88,13 +88,13 @@ erDiagram
 
 ```mermaid
 flowchart LR
-  A[Binance forceOrder arr] --> N[Normalizer]
-  B[Bybit v5 liquidation SYMBOL] --> N
-  C[OKX v5 liquidation orders] --> N
+  A[Binance !forceOrder@arr] --> N[Normalizer]
+  B[Bybit allLiquidation.<SYMBOL>] --> N
+  C[OKX liquidation-orders] --> N
   N --> W[WriterShim]
-  W --> F[CSV daily rotate]
+  W --> F[CSV (daily rotate)]
   W --> P[Postgres (batch inserts)]
-  W --> T[Terminal prints color-coded]
+  W --> T[Terminal Prints (color-coded)]
 ```
 
 ## 📌 Notes
