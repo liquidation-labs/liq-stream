@@ -88,8 +88,8 @@ erDiagram
 
 ```mermaid
 flowchart LR
-  A[Binance !forceOrder@arr] --> N[Normalizer]
-  B[Bybit allLiquidation.<SYMBOL>] --> N
+  A[Binance forceOrder arr] --> N[Normalizer]
+  B[Bybit allLiquidation.SYMBOL] --> N
   C[OKX liquidation-orders] --> N
   N --> W[WriterShim]
   W --> F[CSV (daily rotate)]
