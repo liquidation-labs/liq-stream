@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented here.
 
+### 📌 Changelog entry
+
+## v0.5.0 (2025-09-24)
+### Added
+- **Aster adapter** (USDT-M only) with unified schema
+- `--exchange aster` and `--streams ... aster:usdt`
+- Included in `--all` mode
+- Docs updated (README + diagrams)
+
+### Fixed
+- Stream runner now passes `market` argument safely to Aster
+
 ## v0.4.0 (2025-09-22)
 ### Added
 - Postgres sink (`--sink pg`) with batch inserts via `asyncpg`

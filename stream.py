@@ -1,9 +1,10 @@
-# stream.py (only the changed/new parts)
+# stream.py
 
 import argparse
 import asyncio
 import os
 from datetime import datetime, timezone
+from typing import Optional, Tuple, List
 
 from adapters import get_adapter
 from writer_csv import CSVWriter
@@ -12,8 +13,8 @@ from writer_pg import PostgresWriter  # NEW
 
 def parse_args():
     p = argparse.ArgumentParser(description="Stream crypto liquidations → CSV and/or Postgres")
-    # existing…
-    p.add_argument("--exchange", choices=["binance", "bybit", "okx"])
+    # include 'aster' here
+    p.add_argument("--exchange", choices=["binance", "bybit", "okx", "aster"])
     p.add_argument("--market", choices=["usdt", "coin"])
     p.add_argument("--outdir", help="Output directory (single-stream mode)")
     p.add_argument("--all", action="store_true")
@@ -40,7 +41,8 @@ class WriterShim:
     """
     Fan-out writer: prints, then forwards to CSV and/or Postgres.
     """
-    def __init__(self, outdir: str, print_colors: bool, no_write: bool, csv_writer: CSVWriter | None, pg_writer: PostgresWriter | None):
+    def __init__(self, outdir: str, print_colors: bool, no_write: bool,
+                 csv_writer: Optional[CSVWriter], pg_writer: Optional[PostgresWriter]):
         self.no_write = no_write
         self.csv_writer = csv_writer
         self.pg_writer = pg_writer
@@ -78,20 +80,31 @@ class WriterShim:
             self.pg_writer.write_row(row)
 
 
-def _resolve_streams(args):
-    pairs = []
+def _resolve_streams(args) -> List[Tuple[str, str]]:
+    pairs: List[Tuple[str, str]] = []
     if args.all:
         pairs = [
             ("binance", "usdt"), ("binance", "coin"),
             ("bybit", "usdt"),   ("bybit", "coin"),
             ("okx", "usdt"),     ("okx", "coin"),
+            ("aster", "usdt"),   # NEW: aster is USDT-margined
         ]
     elif args.streams:
         for item in args.streams.split(","):
             ex, mk = item.strip().split(":")
-            pairs.append((ex.lower(), mk.lower()))
+            ex, mk = ex.lower(), mk.lower()
+            # Guard: Aster is USDT-only
+            if ex == "aster" and mk != "usdt":
+                print("[aster] Warning: overriding market to 'usdt' (Aster is USDT-margined).")
+                mk = "usdt"
+            pairs.append((ex, mk))
     else:
-        pairs = [(args.exchange, args.market)]
+        ex = (args.exchange or "").lower()
+        mk = (args.market or "").lower()
+        if ex == "aster" and mk != "usdt":
+            print("[aster] Warning: overriding --market to 'usdt' (Aster is USDT-margined).")
+            mk = "usdt"
+        pairs = [(ex, mk)]
     return pairs
 
 
@@ -99,7 +112,7 @@ def _outdir_for(ex: str, mk: str, args) -> str:
     return args.outdir or os.path.join(args.outdir_root, f"{ex}_{mk}")
 
 
-async def _run_one(ex: str, mk: str, args, pg_writer: PostgresWriter | None):
+async def _run_one(ex: str, mk: str, args, pg_writer: Optional[PostgresWriter]):
     outdir = _outdir_for(ex, mk, args)
     csv_writer = None
     if args.sink in ("csv", "both") and not args.no_write:
@@ -118,6 +131,7 @@ async def _run_one(ex: str, mk: str, args, pg_writer: PostgresWriter | None):
     if ex == "bybit":
         adapter = Adapter(writer=writer, market=mk, symbols=None, subscribe_chunk=max(1, args.subscribe_chunk))
     else:
+        # binance, okx, aster use (writer, market)
         adapter = Adapter(writer=writer, market=mk)
 
     print(f"[{ex}/{mk}] starting → {outdir} @ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")

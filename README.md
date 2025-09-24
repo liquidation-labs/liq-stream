@@ -3,7 +3,7 @@
 ![Status](https://img.shields.io/badge/status-beta-green)
 
 Stream crypto **liquidation events** from multiple exchanges into clean CSVs or a Postgres database, with unified schema and daily file rotation.  
-Supports **Binance (USDT-M & COIN-M)**, **Bybit (USDT-M & Inverse/COIN-M)**, and **OKX (USDT-M & COIN-M)**.
+Supports **Binance (USDT-M & COIN-M)**, **Bybit (USDT-M & Inverse/COIN-M)**, **OKX (USDT-M & COIN-M)**, and **Aster (USDT-M only)**.
 
 ## ✨ Features
 - 🔥 Run **all exchanges + markets at once** with one command (`--all`)
@@ -19,7 +19,7 @@ Supports **Binance (USDT-M & COIN-M)**, **Bybit (USDT-M & Inverse/COIN-M)**, and
 ```bash
 pip install -r requirements.txt
 
-# Run everything (Binance + Bybit + OKX, USDT & COIN) → CSVs
+# Run everything (Binance + Bybit + OKX + Aster) → CSVs
 python -m stream --all --outdir-root data
 
 # Run everything → Postgres
@@ -32,10 +32,10 @@ python -m stream --all --sink both --outdir-root data --pg-dsn "postgresql://use
 ## 🎮 Usage Examples
 ```bash
 # Run a custom set of streams
-python -m stream --streams binance:usdt,bybit:coin,okx:usdt --outdir-root data
+python -m stream --streams binance:usdt,bybit:coin,okx:usdt,aster:usdt --outdir-root data
 
-# Run a single stream (backward compatible)
-python -m stream --exchange binance --market usdt --outdir data/binance_usdt
+# Run a single stream
+python -m stream --exchange aster --market usdt --outdir data/aster_usdt
 
 # Extra options
 Print only (no CSV/DB):
@@ -54,8 +54,8 @@ python -m stream --all --sink pg --pg-dsn "$PG_DSN" --pg-batch 50 --pg-interval 
 ## 📁 Unified Schema
 Each row has:
 
-- **exchange**: binance | bybit | okx
-- **market**: usdt | coin
+- **exchange**: binance | bybit | okx | aster
+- **market**: usdt | coin (Aster = usdt only)
 - **symbol**: trading pair symbol
 - **side**: long = long positions liquidated (forced sell), short = short positions liquidated (forced buy)
 - **qty**: contracts/amount liquidated
@@ -91,6 +91,7 @@ flowchart LR
   A["Binance !forceOrder@arr"] --> N["Normalizer"]
   B["Bybit allLiquidation.&lt;SYMBOL&gt;"] --> N
   C["OKX liquidation-orders"] --> N
+  D["Aster !forceOrder@arr"] --> N
   N --> W["WriterShim"]
   W --> F["CSV (daily rotate)"]
   W --> P["Postgres (batch inserts)"]
@@ -101,3 +102,4 @@ flowchart LR
 - **Binance**: uses all-symbols liquidation feed (!forceOrder@arr), USDT-M via fstream, COIN-M via dstream.
 - **Bybit**: auto-discovers all symbols via REST (linear for USDT-M, inverse for COIN-M), subscribes to each with allLiquidation.<SYMBOL>.
 - **OKX**: single subscription to liquidation-orders (instType=SWAP), filters *-USDT/USDC-SWAP vs *-USD-SWAP.
+- **Aster**: single all-symbols liquidation feed (!forceOrder@arr), USDT-margined only.
