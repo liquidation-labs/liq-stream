@@ -25,8 +25,10 @@ def _derive_liq_side(order_side: Optional[str]) -> Optional[str]:
 class AsterAdapter:
     EXCHANGE = "aster"
 
-    def __init__(self, writer):
+    def __init__(self, writer, market: str = "usdt"):
         self.writer = writer
+        # Aster is USDT-only; keep for compatibility with stream.py
+        self.market = "usdt"
         self.ws_url = WSS
 
     def _normalize_and_write_batch(self, payload: Any):
@@ -72,7 +74,7 @@ class AsterAdapter:
 
                 out = {
                     "exchange": self.EXCHANGE,
-                    "market": "usdt",          # Aster perps are USDT-margined
+                    "market": self.market,          # Aster perps are USDT-margined
                     "symbol": symbol,
                     "side": liq_side,          # "long" or "short" positions liquidated
                     "qty": qty,

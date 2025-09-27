@@ -1,16 +1,27 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
 .venv/
 .env
 
 # Data
 data/
+*/data/
 *.csv
+logs/
+*.log
 
 # OS/editor
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
 
 # Logs
 logs/
+
+# Notebooks / misc
+.ipynb_checkpoints/

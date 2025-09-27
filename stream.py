@@ -5,6 +5,7 @@ import asyncio
 import os
 from datetime import datetime, timezone
 from typing import Optional, Tuple, List
+from pathlib import Path
 
 from adapters import get_adapter
 from writer_csv import CSVWriter
@@ -12,10 +13,11 @@ from writer_pg import PostgresWriter  # NEW
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Stream crypto liquidations → CSV and/or Postgres")
-    # include 'aster' here
-    p.add_argument("--exchange", choices=["binance", "bybit", "okx", "aster"])
-    p.add_argument("--market", choices=["usdt", "coin"])
+    p = argparse.ArgumentParser(description="Stream crypto liquidations ? CSV and/or Postgres")
+    # include 'aster' + 'hyperliquid' here
+    p.add_argument("--exchange", choices=["binance", "bybit", "okx", "aster", "hyperliquid"])
+    # add 'usdc' for Hyperliquid
+    p.add_argument("--market", choices=["usdt", "coin", "usdc"])
     p.add_argument("--outdir", help="Output directory (single-stream mode)")
     p.add_argument("--all", action="store_true")
     p.add_argument("--streams", default="")
@@ -34,6 +36,11 @@ def parse_args():
                    help="Batch size for inserts")
     p.add_argument("--pg-interval", type=float, default=float(os.environ.get("PG_INTERVAL", "1.0")),
                    help="Flush interval seconds")
+    # NEW: Hyperliquid file adapter options
+    p.add_argument("--hl-root", default=os.environ.get("HL_HOURLY_ROOT", ""),
+                   help="Hyperliquid hourly fills root (defaults to ~/hl/data/node_fills_streaming/hourly)")
+    p.add_argument("--hl-no-catchup", action="store_true",
+                   help="Skip historical backfill for Hyperliquid; only tail the latest hour")
     return p.parse_args()
 
 
@@ -87,16 +94,20 @@ def _resolve_streams(args) -> List[Tuple[str, str]]:
             ("binance", "usdt"), ("binance", "coin"),
             ("bybit", "usdt"),   ("bybit", "coin"),
             ("okx", "usdt"),     ("okx", "coin"),
-            ("aster", "usdt"),   # NEW: aster is USDT-margined
+            ("aster", "usdt"),   # Aster is USDT-margined
+            ("hyperliquid", "usdc"),  # Hyperliquid perps settled in USDC
         ]
     elif args.streams:
         for item in args.streams.split(","):
             ex, mk = item.strip().split(":")
             ex, mk = ex.lower(), mk.lower()
-            # Guard: Aster is USDT-only
+            # Guards for market correctness
             if ex == "aster" and mk != "usdt":
                 print("[aster] Warning: overriding market to 'usdt' (Aster is USDT-margined).")
                 mk = "usdt"
+            if ex == "hyperliquid" and mk != "usdc":
+                print("[hyperliquid] Warning: overriding market to 'usdc' (Hyperliquid is USDC).")
+                mk = "usdc"
             pairs.append((ex, mk))
     else:
         ex = (args.exchange or "").lower()
@@ -104,6 +115,9 @@ def _resolve_streams(args) -> List[Tuple[str, str]]:
         if ex == "aster" and mk != "usdt":
             print("[aster] Warning: overriding --market to 'usdt' (Aster is USDT-margined).")
             mk = "usdt"
+        if ex == "hyperliquid" and mk != "usdc":
+            print("[hyperliquid] Warning: overriding --market to 'usdc' (Hyperliquid is USDC).")
+            mk = "usdc"
         pairs = [(ex, mk)]
     return pairs
 
@@ -130,11 +144,25 @@ async def _run_one(ex: str, mk: str, args, pg_writer: Optional[PostgresWriter]):
     Adapter = get_adapter(ex)
     if ex == "bybit":
         adapter = Adapter(writer=writer, market=mk, symbols=None, subscribe_chunk=max(1, args.subscribe_chunk))
+    elif ex == "hyperliquid":
+        # File-based adapter: pass root_dir & catch_up options
+        hl_root = args.hl_root or str(Path.home() / "hl" / "data" / "node_fills_streaming" / "hourly")
+        adapter = Adapter(
+            writer=writer,
+            market=mk,                   # "usdc"
+            root_dir=hl_root,
+            # Optional knobs; present in our adapter implementation
+            # min_abs_sz could be added here later if you want a CLI flag
+            # min_abs_sz=0.0,
+            # poll_sec=0.15,
+            # rollover_check_sec=1.0,
+            catch_up=(not args.hl_no_catchup),
+        )
     else:
         # binance, okx, aster use (writer, market)
         adapter = Adapter(writer=writer, market=mk)
 
-    print(f"[{ex}/{mk}] starting → {outdir} @ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"[{ex}/{mk}] starting ? {outdir} @ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     await adapter.run()
 
 
@@ -165,7 +193,7 @@ def main():
     try:
         asyncio.run(run_all(args))
     except KeyboardInterrupt:
-        print("\nShutting down…")
+        print("\nShutting down")
 
 
 if __name__ == "__main__":
